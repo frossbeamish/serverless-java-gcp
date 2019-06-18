@@ -1,0 +1,6 @@
+rootProject.name = 'java-serverless-gcp'
+
+include 'cloud-function'
+include 'app-engine'
+include 'cloud-run'
+include 'gke'

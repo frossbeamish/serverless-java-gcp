@@ -1,0 +1,154 @@
+buildscript {
+  repositories {
+    jcenter()    
+    mavenCentral()
+    maven {
+      url "https://plugins.gradle.org/m2/"
+    }
+    mavenLocal()
+  }
+  dependencies {
+    classpath 'gradle.plugin.com.palantir.gradle.gitversion:gradle-git-version:0.12.0-rc2'
+    classpath 'com.diffplug.spotless:spotless-plugin-gradle:3.23.0'
+    classpath 'gradle.plugin.com.github.spotbugs:spotbugs-gradle-plugin:2.0.0'
+  }
+}
+
+apply plugin: 'com.palantir.git-version'
+apply plugin: 'com.github.spotbugs'
+
+final calVer = new Date().format('yyyy.MMdd.HHmm', TimeZone.getTimeZone('UTC'))
+project.ext.set('versionDetails', versionDetails())
+project.ext.set('gcpProject', project.findProperty('PROJECT_ID') ?: System.getenv('PROJECT_ID'))
+
+allprojects {
+  group = 'com.frossbeamish.serverless'
+  version = "${calVer}+${project.versionDetails.getVersion()}"
+
+  apply plugin: 'idea'
+  apply plugin: 'com.diffplug.gradle.spotless'
+
+  final forceDownloads = project.tasks.create(name: 'forceDownloads', group: 'Keap',
+      description: 'Forces the resolution and downloading of all configuration dependencies')
+  forceDownloads.doLast {
+    project.buildscript.configurations.all*.each {}
+    project.configurations.all.findAll {
+      it.hasProperty('canBeResolved') ? it.canBeResolved : true
+    }*.each {}
+  }
+  if (project.tasks.hasProperty('dependencies')) {
+    project.tasks.dependencies.dependsOn 'buildEnvironment'
+    project.tasks.dependencies.dependsOn forceDownloads
+  }
+
+  final deployTask = project.tasks.create(name: 'deploy', group: 'Keap',
+      description: 'Deploys all publications produced by this project.')
+  final buildTask = project.tasks.build
+  final checkTask = project.tasks.check
+  deployTask.dependsOn buildTask
+  deployTask.dependsOn checkTask
+
+  spotless {
+    java {
+      target project.fileTree(project.rootDir) {
+        include '**/*.java'
+        exclude '**/generated/**/*.java'
+        exclude '**/build/**'
+        exclude '**/sdk/**'
+      }
+      googleJavaFormat('1.7')
+    }
+  }
+
+  idea {
+    module {
+      inheritOutputDirs = false
+      outputDir = project.file("${project.buildDir}/classes/main/")
+      testOutputDir = project.file("${project.buildDir}/classes/test/")
+    }
+  }
+
+  afterEvaluate {
+    project.tasks.each { task ->
+      project.subprojects.each { subproject ->
+        if (subproject.tasks.hasProperty(task.name)) {
+          task.dependsOn subproject.tasks."${task.name}"
+        }
+      }
+    }
+  }
+}
+
+subprojects {
+  apply plugin: 'java'
+  apply plugin: 'jacoco'
+
+  sourceCompatibility = 1.8
+  targetCompatibility = 1.8
+
+  repositories {
+    jcenter()
+    mavenCentral()
+    mavenLocal()
+  }
+
+  dependencies {
+    compile 'com.github.spotbugs:spotbugs-annotations:3.1.3'
+    compile 'com.google.guava:guava:27.1-jre'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.3.1'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.3.1'
+  }
+
+  tasks.withType(Test) {
+    useJUnitPlatform()
+
+    testLogging.showStandardStreams = true
+    beforeTest { descriptor ->
+      logger.lifecycle("test: ${descriptor} Running")
+    }
+
+    onOutput { descriptor, event ->
+      logger.lifecycle("test: ${descriptor}: ${event.message}")
+    }
+    afterTest { descriptor, result ->
+      logger.lifecycle("test: ${descriptor}: ${result}")
+    }
+  }
+
+  tasks.check.dependsOn tasks.jacocoTestReport
+
+  jacocoTestReport {
+    reports {
+      xml.enabled true
+      html.enabled true
+    }
+
+    afterEvaluate {
+      classDirectories.setFrom(files(classDirectories.files.collect {
+        fileTree(dir: it,
+            exclude: [
+                'com/frossbeamish/*/api/**/controller',
+                'com/frossbeamish/*/api/**/generated'
+            ]
+        )
+      }))
+    }
+  }
+
+  tasks.withType(Test).each { task ->
+    task.doLast {
+      if (task.jacoco?.destinationFile?.exists()) {
+        tasks.jacocoTestReport.executionData task
+      }
+    }
+  }
+
+  tasks.withType(com.github.spotbugs.SpotBugsTask) {
+    reports {
+      xml.enabled = false
+      html.enabled = true
+    }
+    excludeFilter new File(project.rootProject.rootDir, 'spotbugs-exclude.xml')
+  }
+}
